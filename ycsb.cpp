@@ -80,6 +80,8 @@ int main(int argc, char **argv) {
 
     cout << "load file:" << load_path << endl;
     cout << "run  file:" << run_path << endl;
+    cout << "thread_num:" << THREAD_NUM << endl;
+    cout << "test_time:" << TEST_TIME <<endl;
 
     {
         YCSBLoader loader(load_path.c_str());
@@ -125,7 +127,7 @@ int main(int argc, char **argv) {
 
         show_info(false);
     }
-
+    cout <<endl<<endl;
     return 0;
 }
 
