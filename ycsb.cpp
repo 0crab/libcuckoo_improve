@@ -56,11 +56,12 @@ void show_info(bool load) {
         runtime += runtimelist[i];
     }
     runtime /= (THREAD_NUM);
-    throughput = LOADER_NUM * 1.0 / runtime;
     if (load) {
+        throughput = LOADER_NUM * 1.0 / runtime;
         cout << "load runtime: " << runtime << endl;
         cout << "load thorughput :" << throughput << endl;
     } else {
+        throughput = RUNNER_NUM * 1.0 / runtime;
         cout << "run runtime: " << runtime << endl;
         cout << "**********run thorughput :" << throughput << endl;
     }
