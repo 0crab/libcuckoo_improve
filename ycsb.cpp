@@ -172,7 +172,9 @@ void runnert(int tid) {
 
     Tracer tracer;
     tracer.startTime();
+
     while(stopMeasure.load(memory_order_relaxed) == 0){
+        uint64_t opcount = 0;
         for (int i = 0; i < send_num; i++) {
             YCSB_request *it = work_load->at(start_index + i);
             if (!it->getOp()) {
@@ -181,6 +183,7 @@ void runnert(int tid) {
                     string s;
                     //string res = Table.find(it->getKey());
                     Table.find(it->getKey(), s);
+                    ++opcount ;
                     //Table.find_KV(it->getKey(),s);
                 } catch (const std::out_of_range &e) {
                     std::cout << e.what() << endl;
@@ -189,10 +192,11 @@ void runnert(int tid) {
 #endif
             } else {
                 Table.insert_or_assign(it->getKey(), it->getVal());
+                ++opcount;
             }
         }
 
-        __sync_fetch_and_add(&runner_num,send_num);
+        __sync_fetch_and_add(&runner_num,opcount);
         uint64_t tmptruntime = tracer.fetchTime();
         if(tmptruntime / 1000000 > TEST_TIME){
             stopMeasure.store(1, memory_order_relaxed);
