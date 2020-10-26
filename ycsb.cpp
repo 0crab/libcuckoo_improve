@@ -14,7 +14,7 @@
 #define THREAD_NUM thread_num
 #define TEST_TIME test_time
 #define LOADER_NUM 100000000
-#define RUNNER_NUM UPDATE_ONLY ? 50000000 : 100000000
+#define RUNNER_NUM runner_num
 
 #if(LOCAL)
 string load_path = "/home/czl/CLionProjects/test_cuckoo/load-a.dat";
@@ -37,7 +37,9 @@ typedef struct {
 
 int thread_num = 4;
 int test_time = 0;
-atomic<int> stopMeasure(0);
+atomic<int> stopMeasure(0);\
+
+uint64_t runner_num;
 
 unsigned long *runtimelist;
 
@@ -190,8 +192,9 @@ void runnert(int tid) {
             }
         }
 
-        uint64_t tmptuntime = tracer.fetchTime();
-        if(tmptuntime / 1000000 > TEST_TIME){
+        __sync_fetch_and_add(&runner_num,send_num);
+        uint64_t tmptruntime = tracer.fetchTime();
+        if(tmptruntime / 1000000 > TEST_TIME){
             stopMeasure.store(1, memory_order_relaxed);
         }
     }
