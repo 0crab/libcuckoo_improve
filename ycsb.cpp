@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <atomic>
-#include <libcuckoo/cuckoohash_map.hh>
+#include "libcuckoo/cuckoohash_map.hh"
 
 #include "tracer1.h"
 

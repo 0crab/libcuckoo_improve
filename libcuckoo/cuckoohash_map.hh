@@ -464,7 +464,7 @@ public:
    */
   template <typename K, typename F> bool find_fn(const K &key, F fn) const {
     const hash_value hv = hashed_key(key);
-    const auto b = snapshot_and_lock_two<normal_mode>(hv);
+    const auto b = snapshot_and_lock_two<normal_mode>(hv,true);
     const table_position pos = cuckoo_find(key, hv.partial, b.i1, b.i2);
     if (pos.status == ok) {
       fn(buckets_[pos.index].mapped(pos.slot));
@@ -797,46 +797,107 @@ private:
   // Instead, we'll mark all of the locks as not migrated. So anybody trying to
   // acquire the lock must also migrate the corresponding buckets if
   // !is_migrated.
-  LIBCUCKOO_SQUELCH_PADDING_WARNING
-  class LIBCUCKOO_ALIGNAS(64) spinlock {
-  public:
-    spinlock() : elem_counter_(0), is_migrated_(true) { lock_.clear(); }
+  //locspin
+#define WRITE_FAVOR
+#ifdef WRITE_FAVOR
+    LIBCUCKOO_SQUELCH_PADDING_WARNING
+    class LIBCUCKOO_ALIGNAS(64) spinlock {
+    public:
+        spinlock() : elem_counter_(0), is_migrated_(true),write_unlock(false) { rwlock = 0; }
 
-    spinlock(const spinlock &other) noexcept
-        : elem_counter_(other.elem_counter()),
-          is_migrated_(other.is_migrated()) {
-      lock_.clear();
-    }
+        spinlock(const spinlock &other) noexcept
+                : elem_counter_(other.elem_counter()),
+                  is_migrated_(other.is_migrated()) {
+            rwlock = 0;
+        }
 
-    spinlock &operator=(const spinlock &other) noexcept {
-      elem_counter() = other.elem_counter();
-      is_migrated() = other.is_migrated();
-      return *this;
-    }
+        spinlock &operator=(const spinlock &other) noexcept {
+            elem_counter() = other.elem_counter();
+            is_migrated() = other.is_migrated();
+            return *this;
+        }
 
-    void lock() noexcept {
-      while (lock_.test_and_set(std::memory_order_acq_rel))
-        ;
-    }
+        inline bool isWriteLocked() {
+            return rwlock & 1;
+        }
+        inline bool isReadLocked() {
+            return rwlock & ~1;
+        }
 
-    void unlock() noexcept { lock_.clear(std::memory_order_release); }
+        inline bool isLocked() {
+            return rwlock;
+        }
 
-    bool try_lock() noexcept {
-      return !lock_.test_and_set(std::memory_order_acq_rel);
-    }
+        void lock() noexcept {
+            //printf("%lu try lock write %lu:%lld\n",pthread_self()%1000,(uint64_t)(&rwlock)%1000,rwlock);
+            while (1) {
+                long long v = rwlock;
+                if (__sync_bool_compare_and_swap(&rwlock, v & ~1, v | 1)) {
+                    while (v & ~1) { // while there are still readers
+                        v = rwlock;
+                    }
+                    write_unlock = true;
+                    return;
+                }
+            }
+        }
 
-    counter_type &elem_counter() noexcept { return elem_counter_; }
-    counter_type elem_counter() const noexcept { return elem_counter_; }
+        void lock(bool r){
+            //printf("--------------------------%lu try lock read %lu:%lld\n",pthread_self()%1000,(uint64_t)(&rwlock)%1000,rwlock);
+            while (1) {
+                while (isWriteLocked()) {}
+                if ((__sync_add_and_fetch(&rwlock, 2) & 1) == 0) return; // when we tentatively read-locked, there was no writer
+                __sync_add_and_fetch(&rwlock, -2); // release our tentative read-lock
+            }
+        }
 
-    bool &is_migrated() noexcept { return is_migrated_; }
-    bool is_migrated() const noexcept { return is_migrated_; }
+        inline bool try_upgradeLock() {
+            long long v = rwlock;
+            if (__sync_bool_compare_and_swap(&rwlock, v & ~1, v | 1)) {
+                __sync_add_and_fetch(&rwlock, -2);
+                while (v & ~1) { // while there are still readers
+                    v = rwlock;
+                }
+                write_unlock = true;
+                return true;
+            }
+            return false;
+        }
 
-  private:
-    std::atomic_flag lock_;
-    counter_type elem_counter_;
-    bool is_migrated_;
-  };
+        inline void degradeLock(){
+            write_unlock = false;
+            __sync_add_and_fetch(&rwlock,1);
+        }
 
+        void unlock() noexcept {
+            if(isWriteLocked() && write_unlock){
+                //printf("%lu write unlock %lu:%lld\n",pthread_self()%1000,(uint64_t)(&rwlock)%1000,rwlock);
+                write_unlock = false;
+                __sync_add_and_fetch(&rwlock, -1);
+            }else {
+                //printf("--------------------------%lu read unlock %lu:%lld\n",pthread_self()%1000,(uint64_t)(&rwlock)%1000,rwlock);
+                __sync_add_and_fetch(&rwlock, -2);
+            }
+        }
+
+        bool try_lock() noexcept {
+            assert(rwlock&1);
+            return !(rwlock & 1);
+        }
+
+        counter_type &elem_counter() noexcept { return elem_counter_; }
+        counter_type elem_counter() const noexcept { return elem_counter_; }
+
+        bool &is_migrated() noexcept { return is_migrated_; }
+        bool is_migrated() const noexcept { return is_migrated_; }
+
+    private:
+        volatile long long rwlock;
+        volatile bool write_unlock;
+        counter_type elem_counter_;
+        bool is_migrated_;
+    };
+#endif
   template <typename U>
   using rebind_alloc =
       typename std::allocator_traits<allocator_type>::template rebind_alloc<U>;
@@ -970,6 +1031,27 @@ private:
     return LockManager(&lock);
   }
 
+    LockManager lock_one(size_type hp, size_type i, normal_mode,bool r) const {
+        locks_t &locks = get_current_locks();
+        const size_type l = lock_ind(i);
+        spinlock &lock = locks[l];
+        while(true) {
+            lock.lock(r);
+            if (lock.is_migrated()) {
+                break; //no need to migrate
+            }else{
+                if (lock.try_upgradeLock()) {
+                    rehash_lock<kIsLazy>(l);
+                    lock.degradeLock();
+                    break; //migrate finish
+                } else {
+                    lock.unlock(); //other thread try migrating now ,just release read lock and lock again
+                }
+            }
+        }
+        return LockManager(&lock);
+    }
+
   // locks the two bucket indexes, always locking the earlier index first to
   // avoid deadlock. If the two indexes are the same, it just locks one.
   //
@@ -996,6 +1078,54 @@ private:
     rehash_lock<kIsLazy>(l2);
     return TwoBuckets(locks, i1, i2, normal_mode());
   }
+
+
+    TwoBuckets lock_two(size_type hp, size_type i1, size_type i2,
+                        normal_mode,bool r) const {
+        size_type l1 = lock_ind(i1);
+        size_type l2 = lock_ind(i2);
+        if (l2 < l1) {
+            std::swap(l1, l2);
+        }
+        locks_t &locks = get_current_locks();
+
+        while(true) {
+            locks[l1].lock(r);
+            check_hashpower(hp, locks[l1]);
+            if (locks[l1].is_migrated()) {
+                break; //no need to migrate
+            }else{
+                if (locks[l1].try_upgradeLock()) {
+                    rehash_lock<kIsLazy>(l1);
+                    locks[l1].degradeLock();
+                    break; //migrate finish
+                } else {
+                    locks[l1].unlock(); //other thread try migrating now ,just release read lock and lock again
+                }
+            }
+        }
+
+        while(true){
+            if (l2 != l1) {
+                locks[l2].lock(r);
+                if (locks[l2].is_migrated()) {
+                    break; //no need to migrate
+                }else{
+                    if (locks[l2].try_upgradeLock()) {
+                        rehash_lock<kIsLazy>(l2);
+                        locks[l2].degradeLock();
+                        break; //migrate finish
+                    } else {
+                        locks[l2].unlock(); //other thread try migrating now ,just release read lock and lock again
+                    }
+                }
+            }else{
+                break;//there are just one bucket need to be locked,and must have been migrated
+            }
+        }
+
+        return TwoBuckets(locks, i1, i2, normal_mode());
+    }
 
   // lock_three locks the three bucket indexes in numerical order, returning
   // the containers as a two (i1 and i2) and a one (i3). The one will not be
@@ -1060,6 +1190,22 @@ private:
       }
     }
   }
+
+    template <typename TABLE_MODE>
+    TwoBuckets snapshot_and_lock_two(const hash_value &hv,bool r) const {
+        while (true) {
+            // Keep the current hashpower and locks we're using to compute the buckets
+            const size_type hp = hashpower();
+            const size_type i1 = index_hash(hp, hv.hash);
+            const size_type i2 = alt_index(hp, hv.partial, i1);
+            try {
+                return lock_two(hp, i1, i2, TABLE_MODE(),r);
+            } catch (hashpower_changed &) {
+                // The hashpower changed while taking the locks. Try again.
+                continue;
+            }
+        }
+    }
 
   // lock_all takes all the locks, and returns a deleter object that releases
   // the locks upon destruction. It does NOT perform any hashpower checks, or
@@ -1418,7 +1564,7 @@ private:
       first.bucket = i2;
     }
     {
-      const auto lock_manager = lock_one(hp, first.bucket, TABLE_MODE());
+      const auto lock_manager = lock_one(hp, first.bucket, TABLE_MODE(),true);
       const bucket &b = buckets_[first.bucket];
       if (!b.occupied(first.slot)) {
         // We can terminate here
@@ -1435,7 +1581,7 @@ private:
       // We get the bucket that this slot is on by computing the alternate
       // index of the previous bucket
       curr.bucket = alt_index(hp, prev.hv.partial, prev.bucket);
-      const auto lock_manager = lock_one(hp, curr.bucket, TABLE_MODE());
+      const auto lock_manager = lock_one(hp, curr.bucket, TABLE_MODE(),true);
       const bucket &b = buckets_[curr.bucket];
       if (!b.occupied(curr.slot)) {
         // We can terminate here
@@ -1619,7 +1765,7 @@ private:
     q.enqueue(b_slot(i2, 1, 0));
     while (!q.empty()) {
       b_slot x = q.dequeue();
-      auto lock_manager = lock_one(hp, x.bucket, TABLE_MODE());
+      auto lock_manager = lock_one(hp, x.bucket, TABLE_MODE(),true);
       bucket &b = buckets_[x.bucket];
       // Picks a (sort-of) random slot to start from
       size_type starting_slot = x.pathcode % slot_per_bucket();
