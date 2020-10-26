@@ -798,7 +798,8 @@ private:
   // acquire the lock must also migrate the corresponding buckets if
   // !is_migrated.
   //locspin
-#define WRITE_FAVOR
+//#define WRITE_FAVOR
+#define READER_FAVOR
 #ifdef WRITE_FAVOR
     LIBCUCKOO_SQUELCH_PADDING_WARNING
     class LIBCUCKOO_ALIGNAS(64) spinlock {
@@ -877,6 +878,110 @@ private:
             }else {
                 //printf("--------------------------%lu read unlock %lu:%lld\n",pthread_self()%1000,(uint64_t)(&rwlock)%1000,rwlock);
                 __sync_add_and_fetch(&rwlock, -2);
+            }
+        }
+
+        bool try_lock() noexcept {
+            assert(rwlock&1);
+            return !(rwlock & 1);
+        }
+
+        counter_type &elem_counter() noexcept { return elem_counter_; }
+        counter_type elem_counter() const noexcept { return elem_counter_; }
+
+        bool &is_migrated() noexcept { return is_migrated_; }
+        bool is_migrated() const noexcept { return is_migrated_; }
+
+    private:
+        volatile long long rwlock;
+        volatile bool write_unlock;
+        counter_type elem_counter_;
+        bool is_migrated_;
+    };
+#endif
+#ifdef READER_FAVOR
+        LIBCUCKOO_SQUELCH_PADDING_WARNING
+    class LIBCUCKOO_ALIGNAS(64) spinlock {
+    public:
+        spinlock() : elem_counter_(0), is_migrated_(true),write_unlock(false) { rwlock = 0; }
+
+        spinlock(const spinlock &other) noexcept
+                : elem_counter_(other.elem_counter()),
+                  is_migrated_(other.is_migrated()) {
+            rwlock = 0;
+        }
+
+        spinlock &operator=(const spinlock &other) noexcept {
+            elem_counter() = other.elem_counter();
+            is_migrated() = other.is_migrated();
+            return *this;
+        }
+
+        inline bool isWriteLocked() {
+            return rwlock & 1;
+        }
+        inline bool isReadLocked() {
+            return rwlock & ~3;
+        }
+
+        inline bool isUpgraeding(){
+            return rwlock & 2;
+        }
+
+        inline bool isLocked() {
+            return rwlock;
+        }
+
+
+
+        void lock() noexcept {
+            while (1) {
+                while (isLocked()) {}
+                if (__sync_bool_compare_and_swap(&rwlock, 0, 1)) {
+                    write_unlock = true;
+                    return;
+                }
+            }
+        }
+
+        void lock(bool r){
+            __sync_add_and_fetch(&rwlock, 4);
+            while (isWriteLocked());
+            return;
+        }
+
+        inline bool try_upgradeLock() {
+            while (1) {
+                auto expval = rwlock;
+                if (expval & 2) return false;
+                auto seenval = __sync_val_compare_and_swap(&rwlock, expval, (expval - 4) |
+                                                                            2 /* subtract our reader count and covert to upgrader */);
+                if (seenval == expval) { // cas success
+                    // cas to writer
+                    while (1) {
+                        while (rwlock & ~2 /* locked by someone else */) {}
+                        if (__sync_bool_compare_and_swap(&rwlock, 2, 1)) {
+                            write_unlock = true;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        inline void degradeLock(){
+            write_unlock = false;
+            __sync_fetch_and_add(&rwlock, 3);
+        }
+
+        void unlock() noexcept {
+            if(isWriteLocked() && write_unlock){
+                //printf("%lu write unlock %lu:%lld\n",pthread_self()%1000,(uint64_t)(&rwlock)%1000,rwlock);
+                write_unlock = false;
+                __sync_add_and_fetch(&rwlock, -1);
+            }else {
+                //printf("--------------------------%lu read unlock %lu:%lld\n",pthread_self()%1000,(uint64_t)(&rwlock)%1000,rwlock);
+                __sync_add_and_fetch(&rwlock, -4);
             }
         }
 
