@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
     if (argc == 3) {
         THREAD_NUM = std::atol(argv[1]);
         TEST_TIME = std::atol(argv[2]);
-        runtimelist = (unsigned long *) malloc(THREAD_NUM * sizeof(unsigned long));
+        runtimelist = (unsigned long *) calloc(THREAD_NUM , sizeof(unsigned long));
     } else {
         printf("./ycsb <thread_num>  <test_time>\n");
         return 0;

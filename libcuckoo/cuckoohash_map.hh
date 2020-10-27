@@ -933,7 +933,6 @@ private:
         }
 
 
-
         void lock() noexcept {
             while (1) {
                 while (isLocked()) {}
