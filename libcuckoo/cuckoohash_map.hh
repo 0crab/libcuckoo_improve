@@ -1078,13 +1078,14 @@ private:
       }
 
       //just hold lock ptr,do lock before call this function
-      void lock_second(spinlock * lock){
+      void lock_second(locks_t & locks){
           if(!lock_one){
-              second_manager_.reset(lock);
+              second_manager_.reset(&locks[l2]);
           }
       }
 
-    bool lock_one;
+
+      bool lock_one;
     bool lock_first;
     size_type i1, i2;
     size_type l1, l2;
@@ -1247,9 +1248,9 @@ private:
         if(!b.lock_one){
             locks_t &locks = get_current_locks();
             locks[b.l2].lock();
-            b.lock_second(&locks[b.l2]);
             //lock1 must not be release here;so its no need to check hashpower
             rehash_lock<kIsLazy>(b.l2);
+            b.lock_second(locks);
         }
     }
 
