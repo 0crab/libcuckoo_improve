@@ -140,10 +140,11 @@ void loadert(int tid) {
 
     int send_num = work_load->size() / THREAD_NUM;
     int start_index = tid * send_num;
+    int p = tid == THREAD_NUM - 1 ? send_num + work_load->size() % THREAD_NUM : send_num;
 
     Tracer tracer;
     tracer.startTime();
-    for (int i = 0; i < send_num; i++) {
+    for (int i = 0; i < p; i++) {
         YCSB_request *it = work_load->at(start_index + i);
         if (!it->getOp()) {
             try {
@@ -182,7 +183,8 @@ void runnert(int tid) {
                 try {
                     string s;
                     //string res = Table.find(it->getKey());
-                    Table.find(it->getKey(), s);
+                    bool b = Table.find(it->getKey(), s);
+                    if(!b) {printf("key not found error\n");exit(-1);}
                     ++opcount ;
                     //Table.find_KV(it->getKey(),s);
                 } catch (const std::out_of_range &e) {
