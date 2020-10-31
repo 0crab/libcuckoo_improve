@@ -557,10 +557,10 @@ public:
                 if (fn(buckets_[pos1.index].mapped(pos1.slot))) {
                     del_from_bucket(pos1.index, pos1.slot);
                 }
+                return false;
             }else{
                 continue;
             }
-            return false;
         } else{
             lock_second(b);
             if(pos1.status == failure_bucket_full_and_key_miss){
@@ -568,7 +568,20 @@ public:
                 lock_one_relesased = true;
             }
             table_position pos2 = cuckoo_insert_loop<normal_mode>(hv, b, key,pos1);
-            if (pos2.status == failure_key_duplicated) {
+            if(b.lock_one){
+                if(b.second_manager_.get()->try_upgradeLock()){
+                    if (pos2.status == failure_key_duplicated) {
+                        if (fn(buckets_[pos2.index].mapped(pos2.slot))) {
+                            del_from_bucket(pos2.index, pos2.slot);
+                        }
+                    }else{
+                        add_to_bucket(pos2.index, pos2.slot, hv.partial, std::forward<K>(key),
+                                      std::forward<Args>(val)...);
+                    }
+                }else{
+                    continue;
+                }
+            }else if(pos2.status == failure_key_duplicated){
                 if(b.second_manager_.get()->try_upgradeLock()){
                     if (fn(buckets_[pos2.index].mapped(pos2.slot))) {
                         del_from_bucket(pos2.index, pos2.slot);
@@ -576,23 +589,20 @@ public:
                 }else{
                     continue;
                 }
-            }else{
-                if(lock_one_relesased){
-                    if(b.second_manager_.get()->try_upgradeLock()){
-                        add_to_bucket(pos2.index, pos2.slot, hv.partial, std::forward<K>(key),
-                                      std::forward<Args>(val)...);
-                    }else{
-                        continue;
-                    }
+            }else if(lock_one_relesased){
+                if(b.second_manager_.get()->try_upgradeLock()){
+                    add_to_bucket(pos2.index, pos2.slot, hv.partial, std::forward<K>(key),
+                                  std::forward<Args>(val)...);
                 }else{
-                    if(b.first_manager_.get()->try_upgradeLock()){
-                        add_to_bucket(pos2.index, pos2.slot, hv.partial, std::forward<K>(key),
-                                      std::forward<Args>(val)...);
-                    }else{
-                        continue;
-                    }
+                    continue;
                 }
-
+            }else {
+                if(b.first_manager_.get()->try_upgradeLock()){
+                    add_to_bucket(pos2.index, pos2.slot, hv.partial, std::forward<K>(key),
+                                  std::forward<Args>(val)...);
+                }else{
+                    continue;
+                }
             }
             return pos2.status == ok;
         }
@@ -990,6 +1000,7 @@ private:
 
         inline bool try_upgradeLock() {
             while (1) {
+                assert(!isWriteLocked());
                 auto expval = rwlock;
                 if (expval & 2) return false;
                 auto seenval = __sync_val_compare_and_swap(&rwlock, expval, (expval - 4) |
