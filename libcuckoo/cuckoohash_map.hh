@@ -568,6 +568,7 @@ public:
                 lock_one_relesased = true;
             }
             table_position pos2 = cuckoo_insert_loop<normal_mode>(hv, b, key,pos1);
+            if(pos2.status == retry) continue;
             if(b.lock_one){
                 if(b.second_manager_.get()->try_upgradeLock()){
                     if (pos2.status == failure_key_duplicated) {
@@ -1507,7 +1508,8 @@ private:
     failure_key_duplicated,
     failure_table_full,
     failure_under_expansion,
-    failure_bucket_full_and_key_miss
+    failure_bucket_full_and_key_miss,
+    retry
   };
 
   // A composite type for functions that need to return a table position, and
@@ -1578,6 +1580,7 @@ private:
         if(b.lock_first){
             pos = cuckoo_insert_second<TABLE_MODE>(hv, b, key, first_pos);
         }else{
+            assert(false);
             pos = cuckoo_insert<TABLE_MODE>(hv, b, key);
         }
       switch (pos.status) {
@@ -1587,13 +1590,17 @@ private:
       case failure_table_full:
         // Expand the table and try again, re-grabbing the locks
         cuckoo_fast_double<TABLE_MODE, automatic_resize>(hp);
-        b = snapshot_and_lock_two<TABLE_MODE>(hv);
-        break;
+        //b = snapshot_and_lock_two<TABLE_MODE>(hv);
+        pos.status = retry;
+        return pos;
+        //break;
       case failure_under_expansion:
         // The table was under expansion while we were cuckooing. Re-grab the
         // locks and try again.
-        b = snapshot_and_lock_two<TABLE_MODE>(hv);
-        break;
+        //b = snapshot_and_lock_two<TABLE_MODE>(hv);
+        pos.status = retry;
+        return pos;
+        //break;
       default:
         assert(false);
       }
