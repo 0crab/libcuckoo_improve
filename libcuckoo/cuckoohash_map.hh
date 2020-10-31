@@ -568,7 +568,19 @@ public:
                 lock_one_relesased = true;
             }
             table_position pos2 = cuckoo_insert_loop<normal_mode>(hv, b, key,pos1);
-            if(pos2.status == retry) continue;
+            if(!b.lock_first){ //two write lock
+                if (pos2.status == ok) {
+                    add_to_bucket(pos2.index, pos2.slot, hv.partial, std::forward<K>(key),
+                                  std::forward<Args>(val)...);
+                } else {
+                    if (fn(buckets_[pos2.index].mapped(pos2.slot))) {
+                        del_from_bucket(pos2.index, pos2.slot);
+                    }
+                }
+                return pos2.status == ok;
+            }
+
+
             if(b.lock_one){
                 if(b.second_manager_.get()->try_upgradeLock()){
                     if (pos2.status == failure_key_duplicated) {
@@ -1580,7 +1592,6 @@ private:
         if(b.lock_first){
             pos = cuckoo_insert_second<TABLE_MODE>(hv, b, key, first_pos);
         }else{
-            assert(false);
             pos = cuckoo_insert<TABLE_MODE>(hv, b, key);
         }
       switch (pos.status) {
@@ -1590,17 +1601,17 @@ private:
       case failure_table_full:
         // Expand the table and try again, re-grabbing the locks
         cuckoo_fast_double<TABLE_MODE, automatic_resize>(hp);
-        //b = snapshot_and_lock_two<TABLE_MODE>(hv);
-        pos.status = retry;
-        return pos;
-        //break;
+        b = snapshot_and_lock_two<TABLE_MODE>(hv);
+        //pos.status = retry;
+        //return pos;
+        break;
       case failure_under_expansion:
         // The table was under expansion while we were cuckooing. Re-grab the
         // locks and try again.
-        //b = snapshot_and_lock_two<TABLE_MODE>(hv);
-        pos.status = retry;
-        return pos;
-        //break;
+        b = snapshot_and_lock_two<TABLE_MODE>(hv);
+        //pos.status = retry;
+        //return pos;
+        break;
       default:
         assert(false);
       }
