@@ -548,29 +548,55 @@ public:
   template <typename K, typename F, typename... Args>
   bool uprase_fn(K &&key, F fn, Args &&... val) {
     hash_value hv = hashed_key(key);
-      TwoBuckets b = snapshot_and_lock_first<normal_mode>(hv);
-      table_position pos1 = insert_first_bucket<normal_mode>(hv, b, key);
-      if (pos1.status == failure_key_duplicated) {
-          if (fn(buckets_[pos1.index].mapped(pos1.slot))) {
-              del_from_bucket(pos1.index, pos1.slot);
-          }
-      } else{
-          lock_second(b);
-          if(pos1.status == failure_bucket_full_and_key_miss){
-              b.unlock_first();
-          }
-          table_position pos2 = cuckoo_insert_loop<normal_mode>(hv, b, key,pos1);
-          if (pos2.status == failure_key_duplicated) {
-              if (fn(buckets_[pos2.index].mapped(pos2.slot))) {
-                  del_from_bucket(pos2.index, pos2.slot);
-              }
-          }else{
-              add_to_bucket(pos2.index, pos2.slot, hv.partial, std::forward<K>(key),
-                            std::forward<Args>(val)...);
-          }
-          return pos2.status == ok;
-      }
-      return false;
+    bool lock_one_relesased = false;
+    while(true){
+        TwoBuckets b = snapshot_and_lock_first<normal_mode>(hv);
+        table_position pos1 = insert_first_bucket<normal_mode>(hv, b, key);
+        if (pos1.status == failure_key_duplicated) {
+            if(b.first_manager_.get()->try_upgradeLock()){
+                if (fn(buckets_[pos1.index].mapped(pos1.slot))) {
+                    del_from_bucket(pos1.index, pos1.slot);
+                }
+            }else{
+                continue;
+            }
+            return false;
+        } else{
+            lock_second(b);
+            if(pos1.status == failure_bucket_full_and_key_miss){
+                b.unlock_first();
+                lock_one_relesased = true;
+            }
+            table_position pos2 = cuckoo_insert_loop<normal_mode>(hv, b, key,pos1);
+            if (pos2.status == failure_key_duplicated) {
+                if(b.second_manager_.get()->try_upgradeLock()){
+                    if (fn(buckets_[pos2.index].mapped(pos2.slot))) {
+                        del_from_bucket(pos2.index, pos2.slot);
+                    }
+                }else{
+                    continue;
+                }
+            }else{
+                if(lock_one_relesased){
+                    if(b.second_manager_.get()->try_upgradeLock()){
+                        add_to_bucket(pos2.index, pos2.slot, hv.partial, std::forward<K>(key),
+                                      std::forward<Args>(val)...);
+                    }else{
+                        continue;
+                    }
+                }else{
+                    if(b.first_manager_.get()->try_upgradeLock()){
+                        add_to_bucket(pos2.index, pos2.slot, hv.partial, std::forward<K>(key),
+                                      std::forward<Args>(val)...);
+                    }else{
+                        continue;
+                    }
+                }
+
+            }
+            return pos2.status == ok;
+        }
+    }
   }
 
   /**
@@ -1090,7 +1116,6 @@ private:
     size_type i1, i2;
     size_type l1, l2;
 
-  private:
     LockManager first_manager_, second_manager_;
   };
 
@@ -1237,19 +1262,44 @@ private:
             std::swap(l1, l2);
         }
         locks_t &locks = get_current_locks();
-        locks[l1].lock();
-        check_hashpower(hp, locks[l1]);
-        rehash_lock<kIsLazy>(l1);
+        spinlock &lock = locks[l1];
+        while(true) {
+            lock.lock(true);
+            if (lock.is_migrated()) {
+                break; //no need to migrate
+            }else{
+                if (lock.try_upgradeLock()) {
+                    rehash_lock<kIsLazy>(l1);
+                    lock.degradeLock();
+                    break; //migrate finish
+                } else {
+                    lock.unlock(); //other thread try migrating now ,just release read lock and lock again
+                }
+            }
+        }
         return TwoBuckets(locks, i1, i2, normal_mode(),true);
+
     }
 
 
     void lock_second(TwoBuckets &b)  {
         if(!b.lock_one){
             locks_t &locks = get_current_locks();
-            locks[b.l2].lock();
-            //lock1 must not be release here;so its no need to check hashpower
-            rehash_lock<kIsLazy>(b.l2);
+            spinlock &lock = locks[b.l2];
+            while(true) {
+                lock.lock(true);
+                if (lock.is_migrated()) {
+                    break; //no need to migrate
+                }else{
+                    if (lock.try_upgradeLock()) {
+                        rehash_lock<kIsLazy>(b.l2);
+                        lock.degradeLock();
+                        break; //migrate finish
+                    } else {
+                        lock.unlock(); //other thread try migrating now ,just release read lock and lock again
+                    }
+                }
+            }
             b.lock_second(locks);
         }
     }
