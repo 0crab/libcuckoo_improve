@@ -569,6 +569,8 @@ public:
             }
             table_position pos2 = cuckoo_insert_loop<normal_mode>(hv, b, key,pos1);
             if(!b.lock_first){ //two write lock
+                assert(b.first_manager_.get()->isWriteLocked());
+                assert(b.second_manager_.get()->isWriteLocked());
                 if (pos2.status == ok) {
                     add_to_bucket(pos2.index, pos2.slot, hv.partial, std::forward<K>(key),
                                   std::forward<Args>(val)...);
@@ -580,7 +582,7 @@ public:
                 return pos2.status == ok;
             }
 
-
+            assert(b.second_manager_.get()->isReadLocked());
             if(b.lock_one){
                 if(b.second_manager_.get()->try_upgradeLock()){
                     if (pos2.status == failure_key_duplicated) {
@@ -1592,6 +1594,9 @@ private:
         if(b.lock_first){
             pos = cuckoo_insert_second<TABLE_MODE>(hv, b, key, first_pos);
         }else{
+            //after run cuckoo or rehash
+            assert(b.first_manager_.get()->isWriteLocked());
+            assert(b.second_manager_.get()->isWriteLocked());
             pos = cuckoo_insert<TABLE_MODE>(hv, b, key);
         }
       switch (pos.status) {
@@ -1602,15 +1607,11 @@ private:
         // Expand the table and try again, re-grabbing the locks
         cuckoo_fast_double<TABLE_MODE, automatic_resize>(hp);
         b = snapshot_and_lock_two<TABLE_MODE>(hv);
-        //pos.status = retry;
-        //return pos;
         break;
       case failure_under_expansion:
         // The table was under expansion while we were cuckooing. Re-grab the
         // locks and try again.
         b = snapshot_and_lock_two<TABLE_MODE>(hv);
-        //pos.status = retry;
-        //return pos;
         break;
       default:
         assert(false);
