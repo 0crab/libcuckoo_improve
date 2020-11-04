@@ -547,17 +547,27 @@ public:
   template <typename K, typename F, typename... Args>
   bool uprase_fn(K &&key, F fn, Args &&... val) {
     hash_value hv = hashed_key(key);
-    auto b = snapshot_and_lock_two<normal_mode>(hv);
-    table_position pos = cuckoo_insert_loop<normal_mode>(hv, b, key);
-    if (pos.status == ok) {
-      add_to_bucket(pos.index, pos.slot, hv.partial, std::forward<K>(key),
-                    std::forward<Args>(val)...);
-    } else {
-      if (fn(buckets_[pos.index].mapped(pos.slot))) {
-        del_from_bucket(pos.index, pos.slot);
-      }
+    while(true){
+        TwoBuckets b = snapshot_and_lock_two<normal_mode>(hv,true);
+        table_position pos = cuckoo_insert_loop<normal_mode>(hv, b, key);
+        if(pos.index == b.i1){
+            if(!b.first_manager_.get()->try_upgradeLock())
+                continue;
+        }else{
+            if(!b.second_manager_.get()->try_upgradeLock())
+                continue;
+        }
+        if (pos.status == ok) {
+            add_to_bucket(pos.index, pos.slot, hv.partial, std::forward<K>(key),
+                          std::forward<Args>(val)...);
+        } else {
+            if (fn(buckets_[pos.index].mapped(pos.slot))) {
+                del_from_bucket(pos.index, pos.slot);
+            }
+        }
+        return pos.status == ok;
     }
-    return pos.status == ok;
+
   }
 
   /**
@@ -1032,10 +1042,24 @@ private:
     TwoBuckets() {}
     TwoBuckets(size_type i1_, size_type i2_, locked_table_mode)
         : i1(i1_), i2(i2_) {}
-    TwoBuckets(locks_t &locks, size_type i1_, size_type i2_, normal_mode)
-        : i1(i1_), i2(i2_), first_manager_(&locks[lock_ind(i1)]),
-          second_manager_((lock_ind(i1) != lock_ind(i2)) ? &locks[lock_ind(i2)]
-                                                         : nullptr) {}
+      TwoBuckets(locks_t & locks, size_type i1_, size_type i2_, normal_mode,bool lock_first_ = false)
+              : i1(i1_), i2(i2_), l1(lock_ind(i1)), l2(lock_ind(i2)), lock_first(lock_first_){
+
+          lock_one = false;
+          if(l1 > l2){
+              std::swap(i1,i2);
+              std::swap(l1,l2);
+          }else if (l1 == l2){
+              lock_one = true;
+          }
+
+          first_manager_.reset(&locks[l1]);
+          if(!lock_first && !lock_one){
+              second_manager_.reset(&locks[l2]);
+          }else{
+              second_manager_.reset(nullptr);
+          }
+      }
 
     void unlock() {
       first_manager_.reset();
@@ -1043,8 +1067,10 @@ private:
     }
 
     size_type i1, i2;
+    size_type l1,l2;
+    bool lock_one,lock_first;
 
-  private:
+//  private:
     LockManager first_manager_, second_manager_;
   };
 
