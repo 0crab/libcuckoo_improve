@@ -550,12 +550,14 @@ public:
     while(true){
         TwoBuckets b = snapshot_and_lock_two<normal_mode>(hv,true);
         table_position pos = cuckoo_insert_loop<normal_mode>(hv, b, key);
-        if(pos.index == b.i1){
-            if(!b.first_manager_.get()->try_upgradeLock())
-                continue;
-        }else{
-            if(!b.second_manager_.get()->try_upgradeLock())
-                continue;
+        if(!b.after_run_cuckoo){
+            if(pos.index == b.i1){
+                if(!b.first_manager_.get()->try_upgradeLock())
+                    continue;
+            }else{
+                if(!b.second_manager_.get()->try_upgradeLock())
+                    continue;
+            }
         }
         if (pos.status == ok) {
             add_to_bucket(pos.index, pos.slot, hv.partial, std::forward<K>(key),
@@ -1043,7 +1045,7 @@ private:
     TwoBuckets(size_type i1_, size_type i2_, locked_table_mode)
         : i1(i1_), i2(i2_) {}
       TwoBuckets(locks_t & locks, size_type i1_, size_type i2_, normal_mode,bool lock_first_ = false)
-              : i1(i1_), i2(i2_), l1(lock_ind(i1)), l2(lock_ind(i2)), lock_first(lock_first_){
+              : after_run_cuckoo(false),i1(i1_), i2(i2_), l1(lock_ind(i1)), l2(lock_ind(i2)), lock_first(lock_first_){
 
           lock_one = false;
           if(l1 > l2){
@@ -1069,6 +1071,7 @@ private:
     size_type i1, i2;
     size_type l1,l2;
     bool lock_one,lock_first;
+    bool after_run_cuckoo;
 
 //  private:
     LockManager first_manager_, second_manager_;
@@ -1458,12 +1461,12 @@ private:
       case failure_table_full:
         // Expand the table and try again, re-grabbing the locks
         cuckoo_fast_double<TABLE_MODE, automatic_resize>(hp);
-        b = snapshot_and_lock_two<TABLE_MODE>(hv);
+        b = snapshot_and_lock_two<TABLE_MODE>(hv,true);
         break;
       case failure_under_expansion:
         // The table was under expansion while we were cuckooing. Re-grab the
         // locks and try again.
-        b = snapshot_and_lock_two<TABLE_MODE>(hv);
+        b = snapshot_and_lock_two<TABLE_MODE>(hv,true);
         break;
       default:
         assert(false);
@@ -1531,6 +1534,7 @@ private:
       // could have inserted the same key into either b.i1 or
       // b.i2, so we check for that before doing the insert.
       table_position pos = cuckoo_find(key, hv.partial, b.i1, b.i2);
+      b.after_run_cuckoo = true;
       if (pos.status == ok) {
         pos.status = failure_key_duplicated;
         return pos;
