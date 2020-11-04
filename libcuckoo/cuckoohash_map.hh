@@ -564,7 +564,7 @@ public:
         hash_value hv = hashed_key(key);
         while(true){
             TwoBuckets b = snapshot_and_lock_two<normal_mode>(hv,true);
-            table_position pos = cuckoo_insert_loop<normal_mode>(hv, b, key);
+            table_position pos = cuckoo_insert_loop_u<normal_mode>(hv, b, key);
             if(b.lock_one ){
                 if(!b.first_manager_.get()->try_upgradeLock())
                     continue;
@@ -1503,6 +1503,32 @@ private:
     }
   }
 
+    template <typename TABLE_MODE, typename K>
+    table_position cuckoo_insert_loop_u(hash_value hv, TwoBuckets &b, K &key) {
+        table_position pos;
+        while (true) {
+            const size_type hp = hashpower();
+            pos = cuckoo_insert_u<TABLE_MODE>(hv, b, key);
+            switch (pos.status) {
+                case ok:
+                case failure_key_duplicated:
+                    return pos;
+                case failure_table_full:
+                    // Expand the table and try again, re-grabbing the locks
+                    cuckoo_fast_double<TABLE_MODE, automatic_resize>(hp);
+                    b = snapshot_and_lock_two<TABLE_MODE>(hv,true);
+                    break;
+                case failure_under_expansion:
+                    // The table was under expansion while we were cuckooing. Re-grab the
+                    // locks and try again.
+                    b = snapshot_and_lock_two<TABLE_MODE>(hv,true);
+                    break;
+                default:
+                    assert(false);
+            }
+        }
+    }
+
   // cuckoo_insert tries to find an empty slot in either of the buckets to
   // insert the given key into, performing cuckoo hashing if necessary. It
   // expects the locks to be taken outside the function. Before inserting, it
@@ -1545,6 +1571,7 @@ private:
     size_type insert_bucket = 0;
     size_type insert_slot = 0;
     cuckoo_status st = run_cuckoo<TABLE_MODE>(b, insert_bucket, insert_slot);
+
     if (st == failure_under_expansion) {
       // The run_cuckoo operation operated on an old version of the table,
       // so we have to try again. We signal to the calling insert method
@@ -1579,6 +1606,64 @@ private:
     return table_position{0, 0, failure_table_full};
   }
 
+        template <typename TABLE_MODE, typename K>
+        table_position cuckoo_insert_u(const hash_value hv, TwoBuckets &b, K &key) {
+            int res1, res2;
+            bucket &b1 = buckets_[b.i1];
+            if (!try_find_insert_bucket(b1, res1, hv.partial, key)) {
+                return table_position{b.i1, static_cast<size_type>(res1),
+                                      failure_key_duplicated};
+            }
+            bucket &b2 = buckets_[b.i2];
+            if (!try_find_insert_bucket(b2, res2, hv.partial, key)) {
+                return table_position{b.i2, static_cast<size_type>(res2),
+                                      failure_key_duplicated};
+            }
+            if (res1 != -1) {
+                return table_position{b.i1, static_cast<size_type>(res1), ok};
+            }
+            if (res2 != -1) {
+                return table_position{b.i2, static_cast<size_type>(res2), ok};
+            }
+            assert(false);
+            // We are unlucky, so let's perform cuckoo hashing.
+            size_type insert_bucket = 0;
+            size_type insert_slot = 0;
+            cuckoo_status st = run_cuckoo<TABLE_MODE>(b, insert_bucket, insert_slot);
+
+            if (st == failure_under_expansion) {
+                // The run_cuckoo operation operated on an old version of the table,
+                // so we have to try again. We signal to the calling insert method
+                // to try again by returning failure_under_expansion.
+                return table_position{0, 0, failure_under_expansion};
+            } else if (st == ok) {
+                assert(TABLE_MODE() == locked_table_mode() ||
+                       !get_current_locks()[lock_ind(b.i1)].try_lock());
+                assert(TABLE_MODE() == locked_table_mode() ||
+                       !get_current_locks()[lock_ind(b.i2)].try_lock());
+                assert(!buckets_[insert_bucket].occupied(insert_slot));
+                assert(insert_bucket == index_hash(hashpower(), hv.hash) ||
+                       insert_bucket == alt_index(hashpower(), hv.partial,
+                                                  index_hash(hashpower(), hv.hash)));
+                // Since we unlocked the buckets during run_cuckoo, another insert
+                // could have inserted the same key into either b.i1 or
+                // b.i2, so we check for that before doing the insert.
+                table_position pos = cuckoo_find(key, hv.partial, b.i1, b.i2);
+                b.after_run_cuckoo = true;
+                assert(b.first_manager_.get()->isWriteLocked());
+                assert(b.second_manager_.get()->isWriteLocked());
+                if (pos.status == ok) {
+                    pos.status = failure_key_duplicated;
+                    return pos;
+                }
+                return table_position{insert_bucket, insert_slot, ok};
+            }
+            assert(st == failure);
+            LIBCUCKOO_DBG("hash table is full (hashpower = %zu, hash_items = %zu,"
+                          "load factor = %.2f), need to increase hashpower\n",
+                          hashpower(), size(), load_factor());
+            return table_position{0, 0, failure_table_full};
+        }
   // add_to_bucket will insert the given key-value pair into the slot. The key
   // and value will be move-constructed into the table, so they are not valid
   // for use afterwards.
