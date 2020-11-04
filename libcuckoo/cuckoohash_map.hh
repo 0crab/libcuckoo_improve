@@ -1488,13 +1488,11 @@ private:
       case failure_key_duplicated:
         return pos;
       case failure_table_full:
-          assert(false);
         // Expand the table and try again, re-grabbing the locks
         cuckoo_fast_double<TABLE_MODE, automatic_resize>(hp);
         b = snapshot_and_lock_two<TABLE_MODE>(hv,true);
         break;
       case failure_under_expansion:
-          assert(false);
         // The table was under expansion while we were cuckooing. Re-grab the
         // locks and try again.
         b = snapshot_and_lock_two<TABLE_MODE>(hv,true);
