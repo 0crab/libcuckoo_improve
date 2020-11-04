@@ -552,6 +552,7 @@ public:
         table_position pos = cuckoo_insert_loop<normal_mode>(hv, b, key);
         if(!b.after_run_cuckoo){
             if(b.lock_one || pos.index == b.i1){
+                if(!b.lock_one) b.second_manager_.reset();
                 if(!b.first_manager_.get()->try_upgradeLock())
                     continue;
             }else{
