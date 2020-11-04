@@ -12,6 +12,7 @@
 
 #define UPDATE_ONLY false
 #define THREAD_NUM thread_num
+#define LOAD_THREAD_NUM 1
 #define TEST_TIME test_time
 #define LOADER_NUM 100000000
 #define RUNNER_NUM runner_num
@@ -57,12 +58,13 @@ void show_info(bool load) {
     for (int i = 0; i < THREAD_NUM; i++) {
         runtime += runtimelist[i];
     }
-    runtime /= (THREAD_NUM);
     if (load) {
+        runtime /= (LOAD_THREAD_NUM);
         throughput = LOADER_NUM * 1.0 / runtime;
         cout << "load runtime: " << runtime << endl;
         cout << "load thorughput :" << throughput << endl;
     } else {
+        runtime /= (THREAD_NUM);
         throughput = RUNNER_NUM * 1.0 / runtime;
         cout << "run runtime: " << runtime << endl;
         cout << "**********run thorughput :" << throughput << endl;
@@ -94,11 +96,11 @@ int main(int argc, char **argv) {
         cout << "finish load load file" << endl;
         std::vector<std::thread> threads;
 
-        for (int i = 0; i < THREAD_NUM; i++) {
+        for (int i = 0; i < LOAD_THREAD_NUM; i++) {
             threads.push_back(std::thread(loadert, i));
         }
-        cout << "finish create thread ==>" << THREAD_NUM << endl;
-        for (int i = 0; i < THREAD_NUM; i++) {
+        cout << "finish create thread ==>" << LOAD_THREAD_NUM << endl;
+        for (int i = 0; i < LOAD_THREAD_NUM; i++) {
             threads[i].join();
         }
         cout << "load stop" << endl;
@@ -138,9 +140,9 @@ void loadert(int tid) {
     std::vector<YCSB_request *> *work_load;
     work_load = &loads;
 
-    int send_num = work_load->size() / THREAD_NUM;
+    int send_num = work_load->size() / LOAD_THREAD_NUM;
     int start_index = tid * send_num;
-    int p = tid == THREAD_NUM - 1 ? send_num + work_load->size() % THREAD_NUM : send_num;
+    int p = tid == LOAD_THREAD_NUM - 1 ? send_num + work_load->size() % LOAD_THREAD_NUM : send_num;
 
     Tracer tracer;
     tracer.startTime();
