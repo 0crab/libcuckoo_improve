@@ -551,8 +551,7 @@ public:
         TwoBuckets b = snapshot_and_lock_two<normal_mode>(hv,true);
         table_position pos = cuckoo_insert_loop<normal_mode>(hv, b, key);
         if(!b.after_run_cuckoo){
-            if(pos.index == b.i1){
-                b.second_manager_.reset();
+            if(b.lock_one || pos.index == b.i1){
                 if(!b.first_manager_.get()->try_upgradeLock())
                     continue;
             }else{
@@ -1461,11 +1460,13 @@ private:
       case failure_key_duplicated:
         return pos;
       case failure_table_full:
+          assert(false);
         // Expand the table and try again, re-grabbing the locks
         cuckoo_fast_double<TABLE_MODE, automatic_resize>(hp);
         b = snapshot_and_lock_two<TABLE_MODE>(hv,true);
         break;
       case failure_under_expansion:
+          assert(false);
         // The table was under expansion while we were cuckooing. Re-grab the
         // locks and try again.
         b = snapshot_and_lock_two<TABLE_MODE>(hv,true);
@@ -1537,6 +1538,8 @@ private:
       // b.i2, so we check for that before doing the insert.
       table_position pos = cuckoo_find(key, hv.partial, b.i1, b.i2);
       b.after_run_cuckoo = true;
+      assert(b.first_manager_.get()->isWriteLocked());
+      assert(b.second_manager_.get()->isWriteLocked());
       if (pos.status == ok) {
         pos.status = failure_key_duplicated;
         return pos;
