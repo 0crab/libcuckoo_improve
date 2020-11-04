@@ -195,7 +195,7 @@ void runnert(int tid) {
                 }
 #endif
             } else {
-                Table.insert_or_assign(it->getKey(), it->getVal());
+                Table.insert_or_assign_u(it->getKey(), it->getVal());
                 ++opcount;
             }
         }

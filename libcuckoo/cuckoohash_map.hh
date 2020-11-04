@@ -546,33 +546,46 @@ public:
    */
   template <typename K, typename F, typename... Args>
   bool uprase_fn(K &&key, F fn, Args &&... val) {
-    hash_value hv = hashed_key(key);
-    while(true){
-        TwoBuckets b = snapshot_and_lock_two<normal_mode>(hv,true);
-        table_position pos = cuckoo_insert_loop<normal_mode>(hv, b, key);
-        if(!b.after_run_cuckoo){
-            if(b.lock_one || pos.index == b.i1){
-                if(!b.lock_one) b.second_manager_.reset();
+      hash_value hv = hashed_key(key);
+      auto b = snapshot_and_lock_two<normal_mode>(hv);
+      table_position pos = cuckoo_insert_loop<normal_mode>(hv, b, key);
+      if (pos.status == ok) {
+          add_to_bucket(pos.index, pos.slot, hv.partial, std::forward<K>(key),
+                        std::forward<Args>(val)...);
+      } else {
+          if (fn(buckets_[pos.index].mapped(pos.slot))) {
+              del_from_bucket(pos.index, pos.slot);
+          }
+      }
+      return pos.status == ok;
+  }
+    template <typename K, typename F, typename... Args>
+    bool uprase_fn_u(K &&key, F fn, Args &&... val) {
+        hash_value hv = hashed_key(key);
+        while(true){
+            TwoBuckets b = snapshot_and_lock_two<normal_mode>(hv,true);
+            table_position pos = cuckoo_insert_loop<normal_mode>(hv, b, key);
+            if(b.lock_one ){
                 if(!b.first_manager_.get()->try_upgradeLock())
                     continue;
             }else{
-                b.first_manager_.reset();
+                if(!b.first_manager_.get()->try_upgradeLock())
+                    continue;
                 if(!b.second_manager_.get()->try_upgradeLock())
                     continue;
             }
-        }
-        if (pos.status == ok) {
-            add_to_bucket(pos.index, pos.slot, hv.partial, std::forward<K>(key),
-                          std::forward<Args>(val)...);
-        } else {
-            if (fn(buckets_[pos.index].mapped(pos.slot))) {
-                del_from_bucket(pos.index, pos.slot);
+            if (pos.status == ok) {
+                add_to_bucket(pos.index, pos.slot, hv.partial, std::forward<K>(key),
+                              std::forward<Args>(val)...);
+            } else {
+                if (fn(buckets_[pos.index].mapped(pos.slot))) {
+                    del_from_bucket(pos.index, pos.slot);
+                }
             }
+            return pos.status == ok;
         }
-        return pos.status == ok;
-    }
 
-  }
+    }
 
   /**
    * Equivalent to calling @ref uprase_fn with a functor that modifies the
@@ -589,6 +602,15 @@ public:
                      },
                      std::forward<Args>(val)...);
   }
+    template <typename K, typename F, typename... Args>
+    bool upsert_u(K &&key, F fn, Args &&... val) {
+        return uprase_fn_u(std::forward<K>(key),
+                         [&fn](mapped_type &v) {
+                             fn(v);
+                             return false;
+                         },
+                         std::forward<Args>(val)...);
+    }
 
   /**
    * Copies the value associated with @p key into @p val. Equivalent to
@@ -655,6 +677,11 @@ public:
     return upsert(std::forward<K>(key), [&val](mapped_type &m) { m = val; },
                   std::forward<V>(val));
   }
+
+    template <typename K, typename V> bool insert_or_assign_u(K &&key, V &&val) {
+        return upsert_u(std::forward<K>(key), [&val](mapped_type &m) { m = val; },
+                      std::forward<V>(val));
+    }
 
   /**
    * Erases the key from the table. Equivalent to calling @ref erase_fn with a
